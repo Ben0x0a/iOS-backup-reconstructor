@@ -1,0 +1,43 @@
+# Domain to filesystem-like mount mapping.
+#
+# Header:
+# - ios_versions.min/max define the inclusive iOS version range this file covers.
+# - The loader scans config/domain_maps/*.yaml in filename order and picks the
+#   first file matching the backup Product Version. If the backup version is
+#   unknown, the first valid map is used.
+#
+# Values are relative to the reconstruction root. Do not start values with "/":
+# the tool intentionally writes inside the selected output folder or zip.
+#
+# Prefix mappings receive the remaining domain suffix through "{suffix}".
+
+name: iOS 13-18 domain mounts
+ios_versions:
+  min: "13.0"
+  max: "18.999"
+
+exact_domains:
+  CameraRollDomain: private/var/mobile/Media
+  DatabaseDomain: private/var/db
+  HealthDomain: private/var/mobile/Library
+  HomeDomain: private/var/mobile
+  HomeKitDomain: private/var/mobile
+  InstallDomain: private/var/installd
+  KeyboardDomain: private/var/mobile
+  KeychainDomain: private/var/Keychains
+  ManagedPreferencesDomain: private/var/Managed Preferences
+  MediaDomain: private/var/mobile/Media
+  MobileDeviceDomain: private/var/MobileDevice
+  RootDomain: private/var/root
+  SystemPreferencesDomain: private/var/preferences
+  WirelessDomain: private/var/wireless
+
+prefix_domains:
+  AppDomainGroup-: private/var/mobile/Containers/Shared/AppGroup/{suffix}
+  AppDomainPlugin-: private/var/mobile/Containers/Data/PluginKitPlugin/{suffix}
+  AppDomain-: private/var/mobile/Containers/Data/Application/{suffix}
+  SysContainerDomain-: private/var/containers/Data/System/{suffix}
+  SysSharedContainerDomain-: private/var/containers/Shared/SystemGroup/{suffix}
+  SysSharedContainers-: private/var/containers/Shared/SystemGroup/{suffix}
+
+unknown_domain_template: unknown_backup_domains/{domain}

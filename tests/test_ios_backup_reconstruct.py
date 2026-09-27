@@ -1,0 +1,482 @@
+"""Tests for the iOS backup reconstruction engine.
+
+Defines: end-to-end reconstruction tests (folder and zip), domain-mapping
+tests, and regression tests for traceability paths, size handling and
+directory-record collisions.
+Used by: pytest / unittest discovery.
+Depends on: core.reconstructor, config.settings.
+"""
+
+import contextlib
+import io
+import logging
+import plistlib
+import sqlite3
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from unittest import mock
+
+from config import settings
+from core import reconstructor as recon
+
+
+def run_cli(argv: list[str]) -> tuple[int, str]:
+    """Invoke the CLI quietly, returning its exit code and logged diagnostics.
+
+    HOW: swallows the JSON result on stdout and attaches a capturing handler to
+    the root logger for the duration of the call.
+    WHY: reconstruction prints its result to stdout and logs diagnostics to
+    stderr by design, which would otherwise bury the test report. A handler is
+    used rather than `redirect_stderr` because `logging.basicConfig` binds its
+    stream at first call and ignores later redirection.
+    """
+    buffer = io.StringIO()
+    handler = logging.StreamHandler(buffer)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    previous_level = root.level
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = recon.main(argv)
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+    return rc, buffer.getvalue()
+
+
+class ReconstructionTests(unittest.TestCase):
+    def make_backup(self, root: Path, include_directory: bool = False) -> tuple[Path, bytes]:
+        backup = root / "backup"
+        backup.mkdir()
+        for name, payload in {
+            "Manifest.plist": {"IsEncrypted": False, "Version": "10.0"},
+            "Info.plist": {"Device Name": "Test iPhone", "Product Version": "17.0"},
+            "Status.plist": {"SnapshotState": "finished"},
+        }.items():
+            with (backup / name).open("wb") as fh:
+                plistlib.dump(payload, fh)
+
+        payload = b"hello forensic world"
+        file_id = "0123456789abcdef0123456789abcdef01234567"
+        source_dir = backup / file_id[:2]
+        source_dir.mkdir()
+        (source_dir / file_id).write_bytes(payload)
+
+        conn = sqlite3.connect(backup / "Manifest.db")
+        conn.execute("CREATE TABLE Files (fileID TEXT, domain TEXT, relativePath TEXT, flags INTEGER, file BLOB)")
+        metadata = plistlib.dumps({"Size": len(payload)})
+        conn.execute(
+            "INSERT INTO Files VALUES (?, ?, ?, ?, ?)",
+            (file_id, "HomeDomain", "Library/SMS/sms.db", 1, metadata),
+        )
+        if include_directory:
+            conn.execute(
+                "INSERT INTO Files VALUES (?, ?, ?, ?, ?)",
+                ("b" * 40, "HomeDomain", "Library/SMS", 2, plistlib.dumps({})),
+            )
+        conn.commit()
+        conn.close()
+        return backup, payload
+
+    def make_backup_with_sizes(self, root: Path, entries: dict[str, tuple[bytes, int]]) -> Path:
+        """Build a backup whose rows declare a chosen ``Size``, which may differ
+        from the real blob length."""
+        backup = root / "backup"
+        backup.mkdir()
+        for name, payload in {
+            "Manifest.plist": {"IsEncrypted": False},
+            "Info.plist": {"Product Version": "17.0"},
+            "Status.plist": {},
+        }.items():
+            (backup / name).write_bytes(plistlib.dumps(payload))
+        conn = sqlite3.connect(backup / "Manifest.db")
+        conn.execute("CREATE TABLE Files (fileID TEXT, domain TEXT, relativePath TEXT, flags INTEGER, file BLOB)")
+        for index, (relative_path, (blob, declared_size)) in enumerate(entries.items()):
+            file_id = f"{index:02x}" + "a" * 38
+            (backup / file_id[:2]).mkdir(exist_ok=True)
+            (backup / file_id[:2] / file_id).write_bytes(blob)
+            conn.execute(
+                "INSERT INTO Files VALUES (?, ?, ?, ?, ?)",
+                (file_id, "HomeDomain", relative_path, 1, plistlib.dumps({"Size": declared_size})),
+            )
+        conn.commit()
+        conn.close()
+        return backup
+
+    def test_info_only_encrypted_sample_does_not_need_crypto(self):
+        sample = Path("data/00008030-000A651E1AD8402E")
+        if not sample.exists():
+            self.skipTest("sample backup not present")
+        rc, _ = run_cli([str(sample), "unused", "--info-only"])
+        self.assertEqual(rc, 0)
+
+    def test_reconstruct_unencrypted_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, payload = self.make_backup(root, include_directory=True)
+            output = root / "out"
+            rc, _ = run_cli([str(backup), str(output), "--format", "folder", "--layout", "backup"])
+            self.assertEqual(rc, 0)
+            restored = output / "HomeDomain" / "Library" / "SMS" / "sms.db"
+            self.assertEqual(restored.read_bytes(), payload)
+            trace = output / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_FILE_MANIFEST_NAME
+            trace_text = trace.read_text()
+            self.assertIn("written", trace_text)
+            self.assertIn("directory_record", trace_text)
+
+    def test_folder_output_ignores_unrelated_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, payload = self.make_backup(root)
+            output = root / "out"
+            output.mkdir()
+            (output / ".DS_Store").write_bytes(b"finder metadata")
+            rc, _ = run_cli([str(backup), str(output), "--format", "folder", "--layout", "backup"])
+            self.assertEqual(rc, 0)
+            restored = output / "HomeDomain" / "Library" / "SMS" / "sms.db"
+            self.assertEqual(restored.read_bytes(), payload)
+
+    def test_folder_output_blocks_existing_traceability_without_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, _ = self.make_backup(root)
+            output = root / "out"
+            (output / settings.TRACEABILITY_DIR_NAME).mkdir(parents=True)
+            rc, _ = run_cli([str(backup), str(output), "--format", "folder"])
+            self.assertEqual(rc, 1)
+
+    def test_reconstruct_unencrypted_zip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, payload = self.make_backup(root)
+            output = root / "out.zip"
+            rc, _ = run_cli([str(backup), str(output), "--format", "zip", "--layout", "backup"])
+            self.assertEqual(rc, 0)
+            with zipfile.ZipFile(output) as zf:
+                self.assertEqual(zf.read("HomeDomain/Library/SMS/sms.db"), payload)
+                self.assertIn(
+                    f"{settings.TRACEABILITY_DIR_NAME}/{settings.TRACEABILITY_PROVENANCE_NAME}", zf.namelist()
+                )
+
+    def test_default_reconstructs_unencrypted_filesystem_layout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, payload = self.make_backup(root)
+            output = root / "out"
+            rc, _ = run_cli([str(backup), str(output), "--format", "folder"])
+            self.assertEqual(rc, 0)
+            restored = output / "private" / "var" / "mobile" / "Library" / "SMS" / "sms.db"
+            self.assertEqual(restored.read_bytes(), payload)
+
+    def test_filesystem_domain_mapping(self):
+        self.assertEqual(
+            recon.mapped_output_path("AppDomain-com.example.app", "Library/test.db", "filesystem").as_posix(),
+            "private/var/mobile/Containers/Data/Application/com.example.app/Library/test.db",
+        )
+        self.assertEqual(
+            recon.mapped_output_path(
+                "SysSharedContainerDomain-systemgroup.example", "data.db", "filesystem"
+            ).as_posix(),
+            "private/var/containers/Shared/SystemGroup/systemgroup.example/data.db",
+        )
+        self.assertEqual(
+            recon.mapped_output_path("HealthDomain", "Health/healthdb.sqlite", "filesystem").as_posix(),
+            "private/var/mobile/Library/Health/healthdb.sqlite",
+        )
+        self.assertEqual(
+            recon.mapped_output_path("HomeKitDomain", "Library/homed/datastore.sqlite", "filesystem").as_posix(),
+            "private/var/mobile/Library/homed/datastore.sqlite",
+        )
+        self.assertEqual(
+            recon.mapped_output_path(
+                "KeyboardDomain", "Library/Keyboard/user_model_database.sqlite", "filesystem"
+            ).as_posix(),
+            "private/var/mobile/Library/Keyboard/user_model_database.sqlite",
+        )
+
+    def test_custom_domain_map_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mapping = Path(tmp) / "domain_mounts.yaml"
+            mapping.write_text(
+                "\n".join(
+                    [
+                        "name: Custom test map",
+                        "ios_versions:",
+                        "  min: '1.0'",
+                        "  max: '99.0'",
+                        "exact_domains:",
+                        "  HomeDomain: custom/mobile",
+                        "prefix_domains:",
+                        "  AppDomain-: custom/apps/{suffix}",
+                        "unknown_domain_template: custom/unknown/{domain}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            domain_map = recon.load_domain_mounts(mapping)
+            self.assertEqual(
+                recon.mapped_output_path("HomeDomain", "Library/test.db", "filesystem", domain_map).as_posix(),
+                "custom/mobile/Library/test.db",
+            )
+            self.assertEqual(
+                recon.mapped_output_path(
+                    "AppDomain-com.example", "Documents/a.txt", "filesystem", domain_map
+                ).as_posix(),
+                "custom/apps/com.example/Documents/a.txt",
+            )
+
+    def test_domain_map_directory_selects_first_matching_ios_range(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_map = root / "01_old.yaml"
+            current_map = root / "02_current.yaml"
+            old_map.write_text(
+                "\n".join(
+                    [
+                        "name: Old map",
+                        "ios_versions:",
+                        "  min: '1.0'",
+                        "  max: '12.999'",
+                        "exact_domains:",
+                        "  HomeDomain: old/mobile",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            current_map.write_text(
+                "\n".join(
+                    [
+                        "name: Current map",
+                        "ios_versions:",
+                        "  min: '13.0'",
+                        "  max: '18.999'",
+                        "exact_domains:",
+                        "  HomeDomain: current/mobile",
+                        "prefix_domains:",
+                        "unknown_domain_template: unknown/{domain}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            domain_map = recon.load_domain_mounts(root, "14.0.1")
+            self.assertEqual(domain_map["name"], "Current map")
+            self.assertEqual(
+                recon.mapped_output_path("HomeDomain", "Library/test.db", "filesystem", domain_map).as_posix(),
+                "current/mobile/Library/test.db",
+            )
+
+    def test_failed_reconstruction_does_not_leave_output_zip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, _ = self.make_backup(root)
+            output = root / "out.zip"
+            with mock.patch("core.reconstructor.copy_plain", side_effect=RuntimeError("copy failed")):
+                rc, stderr_text = run_cli([str(backup), str(output), "--format", "zip"])
+            self.assertEqual(rc, 1)
+            self.assertFalse(output.exists())
+            self.assertIn("Failure report:", stderr_text)
+            reports = list((root / settings.FAILURE_REPORT_DIR_NAME).glob("out-*"))
+            self.assertEqual(len(reports), 1)
+            report = reports[0] / settings.TRACEABILITY_FILE_MANIFEST_NAME
+            self.assertIn("copy failed", report.read_text())
+
+    def test_continue_on_error_produces_partial_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, _ = self.make_backup(root)
+            output = root / "out.zip"
+            with mock.patch("core.reconstructor.copy_plain", side_effect=RuntimeError("copy failed")):
+                rc, _ = run_cli([str(backup), str(output), "--format", "zip", "--continue-on-error"])
+            self.assertEqual(rc, 2)
+            self.assertTrue(output.exists())
+            with zipfile.ZipFile(output) as zf:
+                report = zf.read(
+                    f"{settings.TRACEABILITY_DIR_NAME}/{settings.TRACEABILITY_FILE_MANIFEST_NAME}"
+                ).decode()
+            self.assertIn("failed", report)
+            self.assertIn("copy failed", report)
+
+    def test_dry_run_writes_traceability_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, _ = self.make_backup(root)
+            output = root / "out"
+            rc, _ = run_cli([str(backup), str(output), "--format", "folder", "--dry-run"])
+            self.assertEqual(rc, 0)
+            self.assertTrue(
+                (output / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_FILE_MANIFEST_NAME).is_file()
+            )
+            self.assertFalse((output / "private" / "var" / "mobile" / "Library" / "SMS" / "sms.db").exists())
+            self.assertIn(
+                "planned",
+                (output / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_FILE_MANIFEST_NAME).read_text(),
+            )
+
+    def test_directory_record_after_its_children_does_not_duplicate(self):
+        """Regression: a directory row arriving after its files kept the real
+        folder and no longer produces an empty ``~1`` decoy beside it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, _ = self.make_backup(root, include_directory=True)
+            output = root / "out"
+            rc, _ = run_cli([str(backup), str(output), "--format", "folder", "--layout", "backup"])
+            self.assertEqual(rc, 0)
+            sms_dir = output / "HomeDomain" / "Library" / "SMS"
+            self.assertTrue((sms_dir / "sms.db").is_file())
+            self.assertFalse((output / "HomeDomain" / "Library" / "SMS~1").exists())
+
+    def test_plain_copy_is_not_truncated_to_declared_size(self):
+        """Regression: an unencrypted blob is copied verbatim. A stale or zero
+        ``Size`` in the metadata must not silently truncate intact evidence."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup = self.make_backup_with_sizes(root, {"a/zerosize.bin": (b"X" * 100, 0)})
+            output = root / "out"
+            rc, _ = run_cli([str(backup), str(output), "--format", "folder", "--layout", "backup"])
+            self.assertEqual(rc, 0)
+            restored = output / "HomeDomain" / "a" / "zerosize.bin"
+            self.assertEqual(restored.read_bytes(), b"X" * 100)
+            manifest = (output / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_FILE_MANIFEST_NAME).read_text()
+            row = [line for line in manifest.splitlines() if "zerosize.bin" in line][0]
+            # Source and output digests match: nothing was dropped.
+            self.assertEqual(row.split(",")[6], row.split(",")[7])
+
+    def test_file_manifest_records_the_final_output_path(self):
+        """Regression: rows recorded the temporary staging directory, leaving a
+        forensic manifest pointing at a path that no longer exists."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, _ = self.make_backup(root)
+            output = root / "out"
+            rc, _ = run_cli([str(backup), str(output), "--format", "folder", "--layout", "backup"])
+            self.assertEqual(rc, 0)
+            manifest_path = output / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_FILE_MANIFEST_NAME
+            manifest = manifest_path.read_text()
+            self.assertNotIn("ios_backup_output_", manifest)
+            row = [line for line in manifest.splitlines() if "sms.db" in line][0]
+            recorded = Path(row.split(",")[5])
+            self.assertEqual(recorded, output / "HomeDomain" / "Library" / "SMS" / "sms.db")
+            self.assertTrue(recorded.is_file())
+
+    def test_traceability_filenames_carry_the_tool_tag(self):
+        self.assertIn(settings.TOOL_NAME, settings.TRACEABILITY_PROVENANCE_NAME)
+        self.assertIn(settings.TOOL_NAME, settings.TRACEABILITY_FILE_MANIFEST_NAME)
+
+    def test_version_flag(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit):
+            recon.parse_args(["--version"])
+        self.assertIn(settings.TOOL_VERSION, stdout.getvalue())
+
+    def test_password_redaction(self):
+        self.assertEqual(
+            recon.redact_password_args(["tool", "-p", "secret", "--password=also-secret"]),
+            ["tool", "-p", "<redacted>", "--password=<redacted>"],
+        )
+
+    def test_cli_rejects_password_argument(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                recon.parse_args(["backup", "output", "-p", "secret"])
+
+    def test_file_key_uses_nsdata_and_protection_class(self):
+        record = recon.FileRecord(
+            file_id="a" * 40,
+            domain="HomeDomain",
+            relative_path="Library/test.db",
+            flags=1,
+            metadata={"ProtectionClass": 7, "EncryptionKey": {"NS.data": b"HEAD" + b"x" * 40}},
+            source_path=Path("unused"),
+            output_path=recon.safe_output_path("HomeDomain", "Library/test.db"),
+        )
+        keybag = mock.Mock()
+        keybag.unwrap_key.return_value = b"file-key"
+        self.assertEqual(recon.file_key_for_record(record, keybag), b"file-key")
+        keybag.unwrap_key.assert_called_once_with(7, b"x" * 40)
+
+    def test_encrypted_backup_without_a_tty_fails_cleanly(self):
+        """A non-interactive run (pipe, CI, cron) must raise BackupError rather
+        than letting getpass' EOFError escape as a traceback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup = root / "backup"
+            backup.mkdir()
+            for name, payload in {
+                "Manifest.plist": {"IsEncrypted": True, "BackupKeyBag": b"keybag"},
+                "Info.plist": {"Product Version": "17.0"},
+                "Status.plist": {},
+            }.items():
+                (backup / name).write_bytes(plistlib.dumps(payload))
+            (backup / "Manifest.db").write_bytes(b"encrypted")
+            with mock.patch("core.reconstructor.require_crypto"), mock.patch("sys.stdin") as stdin:
+                stdin.isatty.return_value = False
+                rc, logged = run_cli([str(backup), str(root / "out"), "--format", "folder"])
+            self.assertEqual(rc, 1)
+            self.assertIn("no password was supplied", logged)
+
+    def test_default_passwords_are_not_tried_without_the_opt_in(self):
+        """Guessing is opt-in: with no password, no prompt and no flag, the tool
+        refuses rather than silently trying the acquisition-tool defaults."""
+        with tempfile.TemporaryDirectory() as tmp:
+            backup = Path(tmp) / "backup"
+            backup.mkdir()
+            manifest = {"BackupKeyBag": b"keybag"}
+            attempts = []
+
+            def fake_unlock(_blob, password):
+                attempts.append(password)
+                raise recon.BackupError("bad password")
+
+            with (
+                mock.patch("core.reconstructor.require_crypto"),
+                mock.patch("core.reconstructor.try_unlock_keybag", side_effect=fake_unlock),
+            ):
+                with self.assertRaises(recon.BackupError) as caught:
+                    recon.prepare_manifest_db(backup, True, manifest, None, allow_prompt=False)
+
+            self.assertEqual(attempts, [])
+            self.assertIn("--try-default-passwords", str(caught.exception))
+
+    def test_try_default_passwords_flag_defaults_to_off(self):
+        self.assertFalse(recon.parse_args(["backup", "output"]).try_default_passwords)
+        self.assertTrue(recon.parse_args(["backup", "output", "--try-default-passwords"]).try_default_passwords)
+
+    def test_default_passwords_tried_when_opted_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup = root / "backup"
+            backup.mkdir()
+            (backup / "Manifest.db").write_bytes(b"encrypted")
+            manifest = {"BackupKeyBag": b"keybag"}
+            attempts = []
+
+            def fake_unlock(_blob, password):
+                attempts.append(password)
+                if password == "123456":
+                    return object()
+                raise recon.BackupError("bad password")
+
+            with (
+                mock.patch("core.reconstructor.require_crypto"),
+                mock.patch("core.reconstructor.try_unlock_keybag", side_effect=fake_unlock),
+                mock.patch("core.reconstructor.decrypt_manifest_db", return_value=b"SQLite format 3\x00"),
+                # The default-password unlock logs a warning by design; keep it
+                # out of the test report.
+                mock.patch("core.reconstructor._LOG"),
+            ):
+                db_path, tmp_dir, keybag = recon.prepare_manifest_db(
+                    backup, True, manifest, None, allow_prompt=False, try_default_passwords=True
+                )
+                try:
+                    self.assertTrue(db_path.exists())
+                    self.assertIsNotNone(keybag)
+                finally:
+                    tmp_dir.cleanup()
+
+            self.assertEqual(attempts, ["1234", "12345", "123456"])
+
+
+if __name__ == "__main__":
+    unittest.main()

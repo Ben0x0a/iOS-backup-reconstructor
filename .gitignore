@@ -1,0 +1,52 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# OS/editor metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Machine-specific tooling
+.python-version
+.claude/
+
+# Evidence data. Never commit real acquisitions: they carry PII (device names,
+# serial numbers, user content) and cannot be un-published once pushed.
+data/
+
+# Local reconstruction outputs
+reconstructed/
+reconstructed.zip
+out/
+out.zip
+results/
+failed_traceability_reports/
+_traceability/
+
+# Maintainer notes and planning docs, never shipped
+tasks/
+docs/internal/
+
+# Local secrets/config
+.env
+.env.*
