@@ -196,6 +196,38 @@ class ReconstructionTests(unittest.TestCase):
             "private/var/mobile/Library/Keyboard/user_model_database.sqlite",
         )
 
+    def test_domain_roots_do_not_double_a_relative_path_segment(self):
+        """Regression: a domain root must not repeat a segment the relativePath
+        already carries.
+
+        Verified against 2,638 rows of a real iPhone reconstruction: every
+        CameraRollDomain path begins `Media/`, so a root of
+        `private/var/mobile/Media` produced `private/var/mobile/Media/Media/...`.
+        35 paths were affected, under the DEFAULT filesystem layout.
+        """
+        cases = [
+            ("CameraRollDomain", "Media/PhotoData/Photos.sqlite", "private/var/mobile/Media/PhotoData/Photos.sqlite"),
+            (
+                "CameraRollDomain",
+                "Media/DCIM/100APPLE/IMG_0001.JPG",
+                "private/var/mobile/Media/DCIM/100APPLE/IMG_0001.JPG",
+            ),
+            ("MediaDomain", "Media/Recordings/x.m4a", "private/var/mobile/Media/Recordings/x.m4a"),
+            # A MediaDomain path not starting with Media/ lands under Library,
+            # not under Media/Library.
+            ("MediaDomain", "Library/Logs/x.log", "private/var/mobile/Library/Logs/x.log"),
+            # Unchanged mappings, guarding against over-correction.
+            ("HomeDomain", "Library/SMS/sms.db", "private/var/mobile/Library/SMS/sms.db"),
+            ("HealthDomain", "Health/healthdb.sqlite", "private/var/mobile/Library/Health/healthdb.sqlite"),
+        ]
+        for domain, relative_path, expected in cases:
+            with self.subTest(domain=domain, relative_path=relative_path):
+                mapped = recon.mapped_output_path(domain, relative_path, "filesystem").as_posix()
+                self.assertEqual(mapped, expected)
+                segments = mapped.split("/")
+                doubled = [a for a, b in zip(segments, segments[1:], strict=False) if a == b]
+                self.assertEqual(doubled, [], f"doubled segment in {mapped}")
+
     def test_custom_domain_map_yaml(self):
         with tempfile.TemporaryDirectory() as tmp:
             mapping = Path(tmp) / "domain_mounts.yaml"

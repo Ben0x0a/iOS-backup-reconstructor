@@ -17,7 +17,11 @@ ios_versions:
   max: "18.999"
 
 exact_domains:
-  CameraRollDomain: private/var/mobile/Media
+  # NOT .../Media for these two: their relativePath already begins with
+  # "Media/", so a root ending in Media doubled the segment
+  # (private/var/mobile/Media/Media/DCIM/...). Verified against 2,638 rows of a
+  # real iPhone reconstruction, where 35 paths were affected.
+  CameraRollDomain: private/var/mobile
   DatabaseDomain: private/var/db
   HealthDomain: private/var/mobile/Library
   HomeDomain: private/var/mobile
@@ -26,7 +30,7 @@ exact_domains:
   KeyboardDomain: private/var/mobile
   KeychainDomain: private/var/Keychains
   ManagedPreferencesDomain: private/var/Managed Preferences
-  MediaDomain: private/var/mobile/Media
+  MediaDomain: private/var/mobile
   MobileDeviceDomain: private/var/MobileDevice
   RootDomain: private/var/root
   SystemPreferencesDomain: private/var/preferences

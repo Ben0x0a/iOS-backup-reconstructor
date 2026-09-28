@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-09-28
+
+### Fixed
+
+- **`CameraRollDomain` and `MediaDomain` produced a doubled path segment** under
+  the default `filesystem` layout. Both were mapped to
+  `private/var/mobile/Media`, but their `relativePath` values already begin with
+  `Media/`, so files were written to `private/var/mobile/Media/Media/…`. Both now
+  map to `private/var/mobile`. Verified against 2,638 rows of a real iPhone
+  reconstruction, where 35 paths were affected; the fix reduces doubled-segment
+  paths from 39 to 4, and those 4 are genuine nested directories on the device
+  (`model.mdl/model/model`, `Recents/Recents`), not mapping errors.
+
+  A `MediaDomain` file whose `relativePath` did *not* begin with `Media/` was
+  also misplaced — under `Media/Library/…` rather than `Library/…`.
+
+  **If you reconstructed a backup with 0.1.0 using the default layout**, camera
+  roll and media paths in that output carry an extra `Media` segment. The file
+  contents and all recorded digests are unaffected; only the output paths, and
+  the `output_path` column of the file manifest, are wrong. Re-running with
+  0.1.1 produces the corrected tree.
+
 ## [0.1.0] — 2026-09-27
 
 First public release.
