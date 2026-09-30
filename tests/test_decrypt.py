@@ -162,9 +162,20 @@ def build_encrypted_backup(root: Path, with_class_uuid: bool = True) -> Path:
 
 
 def manifest_rows(db: Path) -> dict[str, dict]:
-    """Decoded MBFile records of an unencrypted Manifest.db, keyed by path."""
+    """Decoded MBFile records of an unencrypted Manifest.db, keyed by path.
+
+    The connection is closed explicitly. WHY it matters: on Windows an open handle
+    blocks deletion, so leaking it here made the temporary directory's cleanup fail
+    — passing on Linux and macOS, which happily delete an open file, and failing
+    only in CI.
+    """
     out = {}
-    for rel, flags, blob in sqlite3.connect(db).execute("SELECT relativePath, flags, file FROM Files"):
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT relativePath, flags, file FROM Files").fetchall()
+    finally:
+        conn.close()
+    for rel, flags, blob in rows:
         if flags != 1:
             continue
         parsed = plistlib.loads(blob)
