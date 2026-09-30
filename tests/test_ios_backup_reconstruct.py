@@ -396,6 +396,25 @@ class ReconstructionTests(unittest.TestCase):
         self.assertIn(settings.TOOL_NAME, settings.TRACEABILITY_PROVENANCE_NAME)
         self.assertIn(settings.TOOL_NAME, settings.TRACEABILITY_FILE_MANIFEST_NAME)
 
+    def test_mode_defaults_to_rebuild(self):
+        self.assertEqual(recon.parse_args(["backup", "output"]).mode, "rebuild")
+        self.assertEqual(recon.parse_args(["backup", "output", "--mode", "decrypt"]).mode, "decrypt")
+
+    def test_flags_with_no_meaning_in_decrypt_mode_are_refused(self):
+        """Silently ignoring them would hand the operator an output they did not
+        ask for, with no way to notice."""
+        for flag in (["--layout", "filesystem"], ["--domain-map", "x"], ["--format", "zip"]):
+            with self.subTest(flag=flag[0]):
+                argv = ["backup", "output", "--mode", "decrypt", *flag]
+                args = recon.parse_args(argv)
+                with self.assertRaises(recon.BackupError) as caught:
+                    recon.reject_conflicting_mode_flags(args, argv)
+                self.assertIn(flag[0], str(caught.exception))
+
+    def test_rebuild_mode_accepts_every_flag(self):
+        argv = ["backup", "output", "--layout", "filesystem", "--format", "zip"]
+        recon.reject_conflicting_mode_flags(recon.parse_args(argv), argv)
+
     def test_version_flag(self):
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit):

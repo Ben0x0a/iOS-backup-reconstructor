@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from config.settings import DEFAULT_OUTPUT_LAYOUT
+from core.decryptor import decrypt_backup
 from core.reconstructor import inspect_backup, reconstruct_backup
 
 
@@ -36,6 +37,21 @@ class ReconstructionWorkerMixin:
 
     def run_reconstruction(self) -> None:
         try:
+            if self.mode == "decrypt":
+                decrypted = decrypt_backup(
+                    Path(self.backup_path),
+                    Path(self.output_path),
+                    self.password or None,
+                    self.force,
+                    ["gui"],
+                    False,
+                    # The GUI requires the password up front, so it never guesses.
+                    False,
+                    progress=self._emit_progress,
+                    cancel=self.cancel_event,
+                )
+                self.finished.emit(decrypted.as_dict())
+                return
             result = reconstruct_backup(
                 Path(self.backup_path),
                 Path(self.output_path),
@@ -125,6 +141,7 @@ def _widget_classes() -> SimpleNamespace:
             password: str,
             force: bool,
             output_layout: str,
+            mode: str = "rebuild",
         ) -> None:
             super().__init__()
             self.backup_path = backup_path
@@ -133,6 +150,7 @@ def _widget_classes() -> SimpleNamespace:
             self.password = password
             self.force = force
             self.output_layout = output_layout
+            self.mode = mode
             self.cancel_event = threading.Event()
 
         def cancel(self) -> None:
@@ -174,6 +192,9 @@ def _widget_classes() -> SimpleNamespace:
             self.output_type = QtWidgets.QComboBox()
             self.output_type.addItem("Backup folder", "folder")
             self.output_type.addItem("Zip archive", "zip")
+            self.mode = QtWidgets.QComboBox()
+            self.mode.addItem("Rebuild into a folder tree", "rebuild")
+            self.mode.addItem("Decrypt only (keep backup layout)", "decrypt")
             self.output_layout = QtWidgets.QComboBox()
             self.output_layout.addItem("Filesystem-like", "filesystem")
             self.output_layout.addItem("Backup domains", "backup")
@@ -198,6 +219,8 @@ def _widget_classes() -> SimpleNamespace:
 
             self._build_layout()
             self._connect()
+            # After the widgets exist: _mode_changed touches the status pane.
+            self._mode_changed()
             self._update_preview()
 
         def _build_layout(self) -> None:
@@ -214,6 +237,7 @@ def _widget_classes() -> SimpleNamespace:
             output_row.addWidget(self.output_browse)
             form.addRow("Output folder", output_row)
 
+            form.addRow("Mode", self.mode)
             form.addRow("Output type", self.output_type)
             form.addRow("Output layout", self.output_layout)
             form.addRow("Output name", self.output_name)
@@ -237,6 +261,7 @@ def _widget_classes() -> SimpleNamespace:
             self.reconstruct_button.clicked.connect(self._reconstruct)
             self.cancel_button.clicked.connect(self._cancel)
             self.input_path.textChanged.connect(self._clear_backup_info)
+            self.mode.currentIndexChanged.connect(self._mode_changed)
             self.output_type.currentIndexChanged.connect(self._update_preview)
             self.output_layout.currentIndexChanged.connect(self._update_preview)
             self.output_folder.textChanged.connect(self._update_preview)
@@ -262,10 +287,28 @@ def _widget_classes() -> SimpleNamespace:
         def _selected_output_layout(self) -> str:
             return str(self.output_layout.currentData())
 
+        def _selected_mode(self) -> str:
+            return str(self.mode.currentData())
+
+        def _mode_changed(self) -> None:
+            """Disable the controls the chosen mode ignores.
+
+            Decryption writes the backup's own hash-addressed layout into a folder,
+            so neither the layout nor the output type applies. Greying them out says
+            so before the run, rather than leaving them looking effective.
+            """
+            decrypting = self._selected_mode() == "decrypt"
+            self.output_layout.setEnabled(not decrypting)
+            self.output_type.setEnabled(not decrypting)
+            self._update_preview()
+
         def _output_path(self) -> Path:
             folder = Path(self.output_folder.text()).expanduser()
             name = self.output_name.text().strip() or "reconstructed"
             output = folder / name
+            # Decryption always writes a folder, so a .zip suffix would lie.
+            if self._selected_mode() == "decrypt":
+                return output
             if self._selected_output_format() == "zip" and output.suffix.lower() != ".zip":
                 output = output.with_suffix(".zip")
             return output
@@ -342,6 +385,13 @@ def _widget_classes() -> SimpleNamespace:
                     append=False,
                 )
                 return
+            mode = self._selected_mode()
+            if mode == "decrypt" and not info.get("encrypted"):
+                self._set_status(
+                    "This backup is not encrypted, so there is nothing to decrypt. Switch the mode to Rebuild.",
+                    append=False,
+                )
+                return
             worker = ReconstructionWorker(
                 self.input_path.text().strip(),
                 str(self._output_path()),
@@ -349,6 +399,7 @@ def _widget_classes() -> SimpleNamespace:
                 self.password.text(),
                 self.force.isChecked(),
                 self._selected_output_layout(),
+                mode,
             )
             self._start_worker(worker, "Reconstruction started...")
 
@@ -404,6 +455,19 @@ def _widget_classes() -> SimpleNamespace:
                 self._set_status("\n".join(lines), append=False)
                 return
             stats = payload.get("stats", {})
+            if payload.get("mode") == "decrypt":
+                lines = [
+                    "Decryption CANCELLED - the output is NOT a usable backup."
+                    if payload.get("cancelled")
+                    else "Decryption finished. The output is an unencrypted backup.",
+                    f"Output: {payload.get('output')}",
+                    f"Files decrypted: {stats.get('written', 0)}",
+                    f"Missing source: {stats.get('missing', 0)}",
+                    f"Failed: {stats.get('failed', 0)}",
+                    "Manifest metadata was rewritten; see the traceability output.",
+                ]
+                self._set_status("\n".join(lines), append=False)
+                return
             lines = [
                 "Reconstruction CANCELLED - the output is incomplete."
                 if payload.get("cancelled")

@@ -17,6 +17,7 @@ Listed in the order an operator uses them.
 
 | Option | Default | Description |
 | --- | --- | --- |
+| `--mode {rebuild,decrypt}` | `rebuild` | `rebuild` reconstructs a directory tree; `decrypt` produces the same backup with its content in the clear. See [Decrypt without rebuilding](../workflows/decrypt-only.md) |
 | `--info-only` | off | Print backup metadata as JSON and exit. Does not need the password or the `cryptography` package |
 | `--dry-run` | off | Write only traceability and planned output paths; reconstruct no content |
 | `--layout {filesystem,backup}` | `filesystem` | `filesystem` maps domains to device-like paths; `backup` keeps domains as top-level folders |

@@ -4,6 +4,53 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-09-30
+
+### Added
+
+- **`--mode decrypt`** — produce the same backup with its content in the clear,
+  keeping the hash-addressed layout, instead of reconstructing a directory tree.
+  The output is a structurally valid *unencrypted* backup, so tools that read iOS
+  backups but cannot decrypt them can open it. Verified against an independent
+  implementation (mf-scan), which reads the result as an unencrypted backup and
+  confirms the recomputed digests with its own SHA-1 attestation.
+
+  `--mode rebuild` (the default) is unchanged and still decrypts on the way.
+
+  Because an encrypted backup records each `Digest` as the SHA-1 of the
+  *ciphertext* and an unencrypted one records the SHA-1 of the *content*, three
+  things are rewritten and all three are recorded in the traceability output:
+  `Manifest.plist` (`IsEncrypted` false, key material removed), each `Files.file`
+  record (`EncryptionKey` removed, `Digest` recomputed), and `Manifest.db` itself.
+  Nothing else changes — records are re-encoded from the same decoded object graph,
+  so uninterpreted fields survive byte-for-byte.
+
+- The file manifest gains `manifest_digest_original` and
+  `manifest_digest_rewritten` columns, so a rewritten digest is always auditable
+  against the source's own value. Both are empty in `rebuild` mode.
+
+- GUI mode selector, with the layout and output-type controls disabled when they
+  do not apply.
+
+### Fixed
+
+- **Keybag class keys are delimited by `CLAS`, not by `UUID`.** The parser started
+  a new protection-class record at each `UUID` tag, so a keybag written without a
+  per-class `UUID` yielded **no class keys at all** — and the failure surfaced as
+  *"Could not unlock backup keybag. Check the backup password."* when the password
+  was correct. Real iOS keybags do carry those UUIDs, so this only bit keybags
+  written otherwise, but the misleading error would have sent an examiner after
+  entirely the wrong problem. `CLAS` is the tag that defines a class, so it is now
+  the one that delimits — matching mf-scan's independent parser.
+
+- A keybag containing no protection-class keys is now reported as malformed rather
+  than as a bad password.
+
+### Changed
+
+- `--layout`, `--domain-map` and `--format` are refused with `--mode decrypt`
+  rather than silently ignored.
+
 ## [0.1.1] — 2026-09-28
 
 ### Fixed

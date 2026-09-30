@@ -29,6 +29,12 @@ Inspect a backup without writing anything:
 uv run python main.py /path/to/ios-backup /path/to/output --info-only
 ```
 
+Decrypt it, keeping the backup's own layout, into a backup any tool can read:
+
+```bash
+uv run python main.py /path/to/ios-backup /path/to/output --mode decrypt
+```
+
 Reconstruct it, with a progress counter on a terminal:
 
 ```bash

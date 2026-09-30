@@ -170,24 +170,34 @@ class Keybag:
         self._parse(data)
 
     def _parse(self, data: bytes) -> None:
+        """Split the TLV stream into header attributes and per-class key records.
+
+        HOW: walks the records in order. Everything before the first `CLAS` is a
+        header attribute; each `CLAS` starts a new protection-class record, and the
+        class tags that follow belong to it until the next `CLAS`.
+
+        WHY `CLAS` delimits rather than `UUID`: a real keybag carries a per-class
+        `UUID` before each `CLAS`, and delimiting on that appears to work — but a
+        keybag written without those per-class UUIDs then yields NO class keys at
+        all, and the failure surfaces as "check the backup password" when the
+        password was right. `CLAS` is the tag that actually defines a class, so it
+        is the one that delimits. Per-class `UUID`/`KTYP`/`PBKY` are not needed for
+        an offline unwrap.
+        """
         current: dict[bytes, Any] | None = None
-        seen_top_uuid = False
         for tag, value in tlv_blocks(data):
             parsed: Any = struct.unpack(">L", value)[0] if len(value) == 4 else value
-            if tag == b"UUID" and not seen_top_uuid:
-                self.attrs[tag] = parsed
-                seen_top_uuid = True
-                continue
-            if tag == b"UUID":
+            if tag == b"CLAS":
                 if current:
                     self._store_class_key(current)
                 current = {tag: parsed}
                 continue
-            if tag in KEYBAG_CLASSKEY_TAGS:
-                if current is not None:
-                    current[tag] = parsed
-                else:
-                    self.attrs[tag] = parsed
+            if current is not None and tag in KEYBAG_CLASSKEY_TAGS:
+                current[tag] = parsed
+                continue
+            # A `UUID` seen inside the class section belongs to that class and is
+            # not needed; keeping the header's own UUID means not overwriting it.
+            if tag == b"UUID" and (current is not None or tag in self.attrs):
                 continue
             self.attrs[tag] = parsed
         if current:
@@ -212,6 +222,11 @@ class Keybag:
         password_bytes = password.encode("utf-8")
         passcode1 = hashlib.pbkdf2_hmac("sha256", password_bytes, dpsl, dpic, 32)
         passcode_key = hashlib.pbkdf2_hmac("sha1", passcode1, salt, iterations, 32)
+
+        # No class keys means the walk found nothing to unwrap. Reporting that as
+        # a bad password would send an examiner hunting for the wrong problem.
+        if not self.class_keys:
+            raise BackupError("Backup keybag contains no protection-class keys (malformed keybag)")
 
         failures = []
         for protection_class, class_key in self.class_keys.items():
@@ -748,6 +763,11 @@ def write_csv(rows: list[dict[str, Any]], fh: io.TextIOBase) -> None:
         "declared_size",
         "status",
         "error",
+        # Written only by --mode decrypt: an encrypted backup records Digest as
+        # SHA-1 of the ciphertext, so decrypting forces it to be recomputed over
+        # the plaintext. Both values are kept so the rewrite is auditable.
+        "manifest_digest_original",
+        "manifest_digest_rewritten",
     ]
     writer = csv.DictWriter(fh, fieldnames=fieldnames)
     writer.writeheader()
@@ -1176,6 +1196,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Output format. auto uses zip on Windows and folder elsewhere.",
     )
     parser.add_argument(
+        "--mode",
+        choices=("rebuild", "decrypt"),
+        default="rebuild",
+        help=(
+            "rebuild reconstructs the backup into a directory tree (decrypting first "
+            "when needed); decrypt produces the same backup with its content in the "
+            "clear, keeping the hash-addressed layout."
+        ),
+    )
+    parser.add_argument(
         "--layout",
         choices=OUTPUT_LAYOUTS,
         default=DEFAULT_OUTPUT_LAYOUT,
@@ -1432,6 +1462,26 @@ def tty_progress_reporter() -> ProgressCallback | None:
     return report
 
 
+def reject_conflicting_mode_flags(args: argparse.Namespace, raw_args: list[str]) -> None:
+    """Refuse flags that have no meaning in the chosen mode.
+
+    WHY an error rather than a silent no-op: an operator who passes
+    `--mode decrypt --layout filesystem` believes they asked for a filesystem
+    layout. Ignoring it would hand them an output they did not ask for and had no
+    way to notice.
+    """
+    if args.mode != "decrypt":
+        return
+    passed = {arg.split("=", 1)[0] for arg in raw_args}
+    for flag, reason in (
+        ("--layout", "the output keeps the backup's own hash-addressed layout"),
+        ("--domain-map", "no domain mapping is applied"),
+        ("--format", "the output is always a folder"),
+    ):
+        if flag in passed:
+            raise BackupError(f"{flag} has no effect with --mode decrypt: {reason}.")
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_args = sys.argv[1:] if argv is None else argv
     command = redact_password_args([sys.argv[0], *raw_args])
@@ -1446,7 +1496,33 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(inspect_backup(args.backup), indent=2, sort_keys=True))
             return 0
 
+        reject_conflicting_mode_flags(args, raw_args)
         progress = None if args.dry_run or args.quiet else tty_progress_reporter()
+
+        if args.mode == "decrypt":
+            from core.decryptor import decrypt_backup
+
+            decrypted = decrypt_backup(
+                args.backup,
+                args.output,
+                None,
+                args.force,
+                command,
+                True,
+                args.try_default_passwords,
+                progress=progress,
+            )
+            if progress is not None:
+                print(file=sys.stderr)
+            print(json.dumps(decrypted.as_dict(), indent=2, sort_keys=True))
+            if decrypted.cancelled:
+                _LOG.warning("Cancelled; the output is incomplete and is not a usable backup")
+                return 3
+            if decrypted.stats["failed"]:
+                _LOG.warning(f"{decrypted.stats['failed']} file(s) failed; see the file manifest")
+                return 2
+            return 0
+
         result = reconstruct_backup(
             args.backup,
             args.output,
