@@ -268,6 +268,64 @@ class GuiTests(unittest.TestCase):
                 (root / "rebuilt" / recon.TRACEABILITY_DIR_NAME / recon.TRACEABILITY_PROVENANCE_NAME).is_file()
             )
 
+    def test_reconstruct_works_without_clicking_check_encryption_first(self):
+        """Regression: pressing Reconstruct on a fresh window must just work.
+
+        `_reconstruct` runs an inspect pass first when it has no cached backup
+        info. That chained reconstruction used to be started from the inspect's
+        FINISH handler, which runs while the inspect thread is still tearing down —
+        so the inspect's teardown cleared the new run's thread reference, the
+        reconstruction thread was destroyed mid-run, and nothing was written. The
+        window reported "Reconstruction started..." and produced no output, and the
+        operator had to click Check encryption first to work around it.
+
+        This drives the real chained path with a live event loop, which the other
+        threaded test deliberately avoids by pre-setting the cached info.
+        """
+        from PySide6 import QtCore
+
+        window = self.make_window()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup = build_backup(root, file_count=5)
+            window.input_path.setText(str(backup))
+            window.output_folder.setText(str(root))
+            window.output_name.setText("out")
+            window.output_layout.setCurrentIndex(window.output_layout.findData("backup"))
+
+            # Exactly what the operator does: press Reconstruct, nothing else.
+            self.assertIsNone(window.last_backup_info, "no inspect has run yet")
+            window._reconstruct()
+            self.assertTrue(window._pending_reconstruct, "the run must be queued behind the inspect")
+
+            guard = QtCore.QTimer()
+            guard.setInterval(20)
+
+            def check_done() -> None:
+                idle = window._worker_thread is None and not window._pending_reconstruct
+                if idle and "finished" in window.status.toPlainText().lower():
+                    guard.stop()
+                    self.app.quit()
+
+            guard.timeout.connect(check_done)
+            guard.start()
+            timeout = QtCore.QTimer()
+            timeout.setSingleShot(True)
+            timeout.timeout.connect(self.app.quit)
+            timeout.start(30000)
+            self.app.exec()
+            guard.stop()
+            timeout.stop()
+
+            status = window.status.toPlainText()
+            self.assertIn("finished", status.lower(), f"status was: {status!r}")
+            self.assertIn("Written: 5", status)
+            out = root / "out" / "HomeDomain" / "Library"
+            self.assertEqual(len(list(out.glob("*.bin"))), 5, "every file must be written")
+            self.assertIsNone(window._worker_thread, "the thread must be torn down")
+            self.assertFalse(window._pending_reconstruct)
+            self.assertTrue(window.reconstruct_button.isEnabled())
+
     def test_cancel_event_is_thread_safe_type(self):
         import gui.interface as interface
 

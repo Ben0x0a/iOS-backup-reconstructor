@@ -432,20 +432,34 @@ def _widget_classes() -> SimpleNamespace:
             thread.start()
 
         def _worker_done(self) -> None:
+            """Tear down the finished run, then start anything queued behind it.
+
+            WHY the chained reconstruction starts HERE rather than from
+            `_worker_finished`: that handler runs while the inspect thread is still
+            finishing. Starting the reconstruction there assigned its thread to
+            `_worker_thread`, and the inspect's own teardown — arriving immediately
+            after — cleared that reference. The reconstruction thread lost its only
+            owner, was destroyed mid-run ("QThread: Destroyed while thread is still
+            running"), and nothing was written. By the time this runs the previous
+            thread has finished, so the next one can be started safely.
+            """
             # Drop the references: both objects have been deleteLater'd, so
             # holding them would leave Python names pointing at dead C++ objects.
             self._worker = None
             self._worker_thread = None
             self._set_busy(False)
+            if self._pending_reconstruct:
+                self._pending_reconstruct = False
+                self._start_reconstruction()
 
         def _worker_finished(self, payload: dict[str, Any]) -> None:
             if "backup" in payload:
                 self.last_backup_info = payload
+                # A reconstruction waiting on this inspect is started from
+                # _worker_done, NOT from here: this handler runs while the inspect
+                # thread is still tearing down, and starting the next run now would
+                # have its thread reference cleared by that teardown.
                 if self._pending_reconstruct:
-                    self._pending_reconstruct = False
-                    # Defer so this handler returns and the inspect thread can
-                    # finish before the reconstruction thread is started.
-                    QtCore.QTimer.singleShot(0, self._start_reconstruction)
                     return
                 lines = [
                     "Backup checked.",

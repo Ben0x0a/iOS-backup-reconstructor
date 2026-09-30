@@ -27,6 +27,16 @@ All notable changes to this project are documented here. The format follows
   A file that is *present but malformed* still raises. Missing means an older
   backup; corrupt means a problem the operator needs to see.
 
+- **Reconstruct and Decrypt now work on the first click in the GUI.** Pressing
+  either on a fresh window runs an encryption check first, then the run. That
+  chained run was started from the check's *finish* handler, which fires while the
+  check's thread is still tearing down — so the teardown cleared the new run's
+  thread reference, the thread was destroyed mid-run, and nothing was written.
+  The window said "Reconstruction started..." and produced no output, and the
+  operator had to press **Check encryption** first to work around it. The chained
+  run now starts from the teardown handler instead, once the previous thread is
+  fully finished.
+
 - **The manifest walk is now ordered by logical name**, not by SQLite's table
   order. The order decides which of two colliding output paths keeps the
   unsuffixed name, and table order depends on SQLite internals — so a manifest
