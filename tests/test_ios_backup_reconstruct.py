@@ -557,6 +557,22 @@ class ReconstructionTests(unittest.TestCase):
                 "the dotfile must keep its name",
             )
 
+    def test_the_manifest_walk_is_ordered_by_logical_name(self):
+        """The order decides which of two colliding paths keeps the plain name, so
+        it must not depend on SQLite's internal row order."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup = self.make_backup_with_sizes(
+                root,
+                {
+                    "z/last.bin": (b"z", 1),
+                    "a/first.bin": (b"a", 1),
+                    "m/middle.bin": (b"m", 1),
+                },
+            )
+            names = [f"{domain}/{rel}" for _, domain, rel, _, _ in recon.iter_manifest_rows(backup / "Manifest.db")]
+            self.assertEqual(names, sorted(names))
+
     def test_version_flag(self):
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit):

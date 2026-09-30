@@ -633,7 +633,15 @@ def is_cancelled(cancel: CancelEvent | None) -> bool:
 def iter_manifest_rows(db_path: Path) -> Iterator[tuple[str, str, str, int, bytes | None]]:
     conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     try:
-        query = "SELECT fileID, domain, relativePath, flags, file FROM Files"
+        # ORDER BY the logical name, not the table's own row order.
+        #
+        # WHY: the order decides which of two colliding output paths keeps the
+        # unsuffixed name (see claim_unique_path). Table order depends on SQLite
+        # internals, so a manifest rewritten by another tool could reorder the
+        # same content and move the `~1`. Sorting makes the output reproducible,
+        # and matches mf-scan's rule so the two tools produce the same tree.
+        # SQLite does the sort, so the walk stays streaming.
+        query = "SELECT fileID, domain, relativePath, flags, file FROM Files ORDER BY domain || '/' || relativePath"
         for file_id, domain, rel_path, flags, file_blob in conn.execute(query):
             if not file_id or not domain:
                 continue

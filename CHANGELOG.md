@@ -27,6 +27,14 @@ All notable changes to this project are documented here. The format follows
   A file that is *present but malformed* still raises. Missing means an older
   backup; corrupt means a problem the operator needs to see.
 
+- **The manifest walk is now ordered by logical name**, not by SQLite's table
+  order. The order decides which of two colliding output paths keeps the
+  unsuffixed name, and table order depends on SQLite internals — so a manifest
+  rewritten by another tool could reorder the same content and move the `~1`.
+  Sorting makes the output reproducible, and matches mf-scan, so the two tools now
+  produce byte-identical trees from the same backup (verified on a real 815-file
+  iPhone backup). SQLite performs the sort, so the walk stays streaming.
+
 - **A leading dot is no longer stripped from filenames.** `sanitise_segment`
   trimmed dots and spaces from *both* ends of every path segment. Trimming the
   trailing end is right — Windows rejects trailing dots and spaces — but a leading
