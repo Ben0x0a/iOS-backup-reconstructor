@@ -7,12 +7,18 @@ content-addressed blobs plus a database describing them.
 
 ```text
 <UDID>/
-├── Info.plist       # Device identity: name, product type, iOS version, serial
-├── Manifest.plist   # Backup-level metadata, encryption flag, keybag
-├── Manifest.db      # SQLite index: one row per backed-up file
-├── Status.plist     # Snapshot state, whether the backup is full
+├── Manifest.plist   # REQUIRED. Backup-level metadata, encryption flag, keybag
+├── Manifest.db      # REQUIRED. SQLite index: one row per backed-up file
+├── Info.plist       # optional. Device identity: name, product type, iOS version
+├── Status.plist     # optional. Snapshot state, whether the backup is full
 ├── 00/ 01/ .. ff/   # File blobs, named by SHA-1, bucketed by first two hex chars
 ```
+
+Only `Manifest.plist` and `Manifest.db` are load-bearing: the first carries the
+encryption state and key material, the second the file table. `Info.plist` and
+`Status.plist` carry provenance, and **older backups may not have them** — so the
+tool reads them when present and records their absence when not, rather than
+refusing to work. A file that is present but malformed is still an error.
 
 ## The Files table
 

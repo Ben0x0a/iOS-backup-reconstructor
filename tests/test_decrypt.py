@@ -269,6 +269,20 @@ class DecryptTests(unittest.TestCase):
             provenance = (out / recon.TRACEABILITY_DIR_NAME / recon.TRACEABILITY_PROVENANCE_NAME).read_text()
             self.assertIn("rewritten_metadata", provenance)
 
+    def test_decrypt_works_without_status_plist(self):
+        """An older encrypted backup carrying no Status.plist still decrypts, and
+        the output simply does not carry one either."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup = build_encrypted_backup(root)
+            (backup / "Status.plist").unlink()
+            out = root / "decrypted"
+            result = decryptor.decrypt_backup(backup, out, password=PASSWORD, allow_password_prompt=False)
+            self.assertEqual(result.stats["written"], 2)
+            self.assertFalse((out / "Status.plist").exists())
+            self.assertTrue((out / "Info.plist").is_file(), "a file that IS present is copied")
+            self.assertTrue((out / "Manifest.db").is_file())
+
     def test_decrypting_an_unencrypted_backup_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

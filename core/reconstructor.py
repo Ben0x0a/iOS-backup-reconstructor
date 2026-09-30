@@ -21,6 +21,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import platform
 import plistlib
 import re
@@ -43,7 +44,9 @@ from config.settings import (
     DEFAULT_BACKUP_PASSWORDS,
     DEFAULT_OUTPUT_LAYOUT,
     FAILURE_REPORT_DIR_NAME,
+    OPTIONAL_BACKUP_FILES,
     OUTPUT_LAYOUTS,
+    REQUIRED_BACKUP_FILES,
     TOOL_NAME,
     TOOL_VERSION,
     TRACEABILITY_DIR_NAME,
@@ -138,6 +141,22 @@ def read_plist(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise BackupError(f"{path.name} is not a plist dictionary")
     return value
+
+
+def read_optional_plist(path: Path) -> dict[str, Any]:
+    """Read a plist that a backup may legitimately not have, or `{}` if absent.
+
+    A present-but-malformed file still raises: a missing file is an older backup,
+    a corrupt one is a problem the operator needs to know about.
+    """
+    if not path.is_file():
+        return {}
+    return read_plist(path)
+
+
+def missing_optional_files(backup_dir: Path) -> list[str]:
+    """Which provenance-only files this backup does not carry."""
+    return [name for name in OPTIONAL_BACKUP_FILES if not (backup_dir / name).is_file()]
 
 
 def sha256_file(path: Path) -> str:
@@ -294,10 +313,39 @@ def resolve_backup_dir(path: Path) -> Path:
         path = path.parent
     if not path.is_dir():
         raise BackupError(f"Backup path is not a directory: {path}")
-    for name in ("Manifest.plist", "Info.plist", "Status.plist", "Manifest.db"):
+    # Only Manifest.plist and Manifest.db are required. Info.plist and Status.plist
+    # carry provenance that older backups may simply not have, and nothing in
+    # reconstruction or decryption reads them — so demanding them rejected backups
+    # this tool can handle. Their absence is reported in the provenance artefact.
+    for name in REQUIRED_BACKUP_FILES:
         if not (path / name).is_file():
             raise BackupError(f"Missing required backup file: {name}")
+    ensure_readable(path)
     return path
+
+
+def ensure_readable(backup_dir: Path) -> None:
+    """Fail early, and legibly, when the backup's files cannot be read.
+
+    WHY here rather than letting the open fail: an acquisition tool that strips
+    permissions leaves every file mode 000, and the resulting `PermissionError`
+    surfaced as a traceback from deep inside the pipeline. Checking up front turns
+    that into one sentence naming the cause and the fix.
+    """
+    unreadable = [
+        name
+        for name in (*REQUIRED_BACKUP_FILES, *OPTIONAL_BACKUP_FILES)
+        if (backup_dir / name).is_file() and not os.access(backup_dir / name, os.R_OK)
+    ]
+    if not unreadable:
+        return
+    raise BackupError(
+        f"Cannot read {', '.join(unreadable)} in {backup_dir}: permission denied. "
+        "Some acquisition tools write the backup with no read permission at all "
+        "(mode 000). Grant yourself read access on a WORKING COPY rather than the "
+        "original evidence, for example: "
+        f"cp -R '{backup_dir}' /path/to/copy && chmod -R u+rX /path/to/copy"
+    )
 
 
 def first_present(mapping: dict[str, Any], names: Iterable[str]) -> Any:
@@ -371,7 +419,11 @@ def source_path_for_file_id(backup_dir: Path, file_id: str) -> Path:
 
 
 def sanitise_segment(segment: str) -> str:
-    cleaned = INVALID_PATH_CHARS.sub("_", segment).strip(" .")
+    # rstrip, NOT strip: a TRAILING dot or space is illegal on Windows, but a
+    # LEADING dot is a legitimate and meaningful part of a Unix filename. Stripping
+    # it renamed the evidence — `.GlobalPreferences.plist` was written out as
+    # `GlobalPreferences.plist`, a different file from the one the backup recorded.
+    cleaned = INVALID_PATH_CHARS.sub("_", segment).rstrip(" .")
     if not cleaned:
         cleaned = "_"
     if cleaned.upper() in RESERVED_WINDOWS_NAMES:
@@ -827,6 +879,11 @@ def write_failure_report(output: Path, provenance: dict[str, Any], rows: list[di
     return report_dir
 
 
+def optional_file_sha256(path: Path) -> str | None:
+    """The file's digest, or None when the backup does not carry it."""
+    return sha256_file(path) if path.is_file() else None
+
+
 def build_provenance(
     backup_dir: Path,
     output: Path,
@@ -860,8 +917,12 @@ def build_provenance(
             "path": str(backup_dir),
             "manifest_plist_sha256": sha256_file(backup_dir / "Manifest.plist"),
             "manifest_db_sha256": sha256_file(backup_dir / "Manifest.db"),
-            "info_plist_sha256": sha256_file(backup_dir / "Info.plist"),
-            "status_plist_sha256": sha256_file(backup_dir / "Status.plist"),
+            # None when the backup does not carry the file at all. `absent_files`
+            # below says which, so a null is never ambiguous between "missing from
+            # the backup" and "the tool failed to read it".
+            "info_plist_sha256": optional_file_sha256(backup_dir / "Info.plist"),
+            "status_plist_sha256": optional_file_sha256(backup_dir / "Status.plist"),
+            "absent_files": missing_optional_files(backup_dir),
             "encrypted": encrypted,
             "manifest_version": manifest.get("Version"),
             "system_domains_version": manifest.get("SystemDomainsVersion"),
@@ -1246,10 +1307,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def inspect_backup(backup: Path) -> dict[str, Any]:
     backup_dir = resolve_backup_dir(backup)
     manifest = read_plist(backup_dir / "Manifest.plist")
-    info = read_plist(backup_dir / "Info.plist")
+    info = read_optional_plist(backup_dir / "Info.plist")
     return {
         "backup": str(backup_dir),
         "encrypted": bool(manifest.get("IsEncrypted", False)),
+        "absent_files": missing_optional_files(backup_dir),
         "device": first_present(info, ("Device Name", "Display Name")),
         "product": info.get("Product Name"),
         "ios": first_present(info, ("Product Version", "ProductVersion")),
@@ -1318,8 +1380,8 @@ def reconstruct_backup(
 ) -> ReconstructionResult:
     backup_dir = resolve_backup_dir(backup)
     manifest = read_plist(backup_dir / "Manifest.plist")
-    info = read_plist(backup_dir / "Info.plist")
-    status = read_plist(backup_dir / "Status.plist")
+    info = read_optional_plist(backup_dir / "Info.plist")
+    status = read_optional_plist(backup_dir / "Status.plist")
     encrypted = bool(manifest.get("IsEncrypted", False))
     output_format = normalise_output_format(output_format)
     output_layout = normalise_output_layout(output_layout)

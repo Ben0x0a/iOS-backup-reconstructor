@@ -12,7 +12,7 @@ from __future__ import annotations
 # Tool identity. Written into every traceability artefact so reconstructed
 # evidence is attributable to the tool and version that produced it.
 TOOL_NAME = "ios-backup-reconstruct"
-TOOL_VERSION = "0.2.0"
+TOOL_VERSION = "0.2.1"
 
 # Traceability artefact names. Both carry the tool tag so an artefact found
 # outside its output folder is still attributable.
@@ -35,6 +35,18 @@ DEFAULT_OUTPUT_LAYOUT = "filesystem"
 # and the choice is recorded in the provenance artefact.
 # Consumed by: core.reconstructor (prepare_manifest_db).
 DEFAULT_BACKUP_PASSWORDS = ("1234", "12345", "123456", "password")
+
+# The files a backup must have. Only these two are load-bearing: Manifest.plist
+# carries the encryption state and key material, Manifest.db the file table.
+# Consumed by: core.reconstructor (resolve_backup_dir).
+REQUIRED_BACKUP_FILES = ("Manifest.plist", "Manifest.db")
+
+# Files that carry provenance only, and that older backups may not have.
+# WHY optional: nothing in reconstruction or decryption reads them, so requiring
+# them rejected backups the tool could otherwise handle perfectly. Their absence
+# is recorded in the provenance artefact rather than passed over.
+# Consumed by: core.reconstructor, core.decryptor.
+OPTIONAL_BACKUP_FILES = ("Info.plist", "Status.plist")
 
 # Read/decrypt chunk size, in bytes. Consumed by: core.reconstructor.
 CHUNK_SIZE = 1024 * 1024

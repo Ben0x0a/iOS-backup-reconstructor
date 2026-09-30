@@ -46,7 +46,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from config.settings import CHUNK_SIZE, TOOL_NAME, TOOL_VERSION
+from config.settings import CHUNK_SIZE, OPTIONAL_BACKUP_FILES, TOOL_NAME, TOOL_VERSION
 from core.reconstructor import (
     BackupError,
     CancelEvent,
@@ -60,6 +60,7 @@ from core.reconstructor import (
     parse_file_metadata,
     plist_data_value,
     prepare_manifest_db,
+    read_optional_plist,
     read_plist,
     report_progress,
     require_crypto,
@@ -73,7 +74,7 @@ _LOG = logging.getLogger(__name__)
 
 # Files copied verbatim from the source backup. Manifest.plist and Manifest.db are
 # handled separately because both are rewritten.
-COPIED_BACKUP_FILES = ("Info.plist", "Status.plist")
+COPIED_BACKUP_FILES = OPTIONAL_BACKUP_FILES
 
 # `Files.flags` value marking a regular file; other values (directory, symlink)
 # carry no blob and keep their manifest row untouched.
@@ -291,7 +292,7 @@ def decrypt_backup(
     """
     backup_dir = resolve_backup_dir(backup)
     manifest = read_plist(backup_dir / "Manifest.plist")
-    info = read_plist(backup_dir / "Info.plist")
+    info = read_optional_plist(backup_dir / "Info.plist")
     if not bool(manifest.get("IsEncrypted", False)):
         raise BackupError(
             "This backup is not encrypted, so there is nothing to decrypt. "

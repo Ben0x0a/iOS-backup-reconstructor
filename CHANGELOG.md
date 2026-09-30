@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-09-30
+
+### Fixed
+
+- **`Status.plist` and `Info.plist` are no longer required.** Older backups may
+  not carry them, and the tool rejected those outright with "Missing required
+  backup file" — even though neither is read by reconstruction or decryption.
+  Both carry provenance only; the genuinely load-bearing files are
+  `Manifest.plist` (encryption state and key material) and `Manifest.db` (the file
+  table), and those are still required.
+
+  The filesystem layout still selects the right domain map without `Info.plist`,
+  because the product version already falls back to `Manifest.plist`'s `Lockdown`
+  dictionary.
+
+  Absence is recorded, not glossed over: provenance gains an `absent_files` list,
+  and the digest of a file the backup does not carry is `null` rather than
+  fabricated — so a null can never be misread as "the tool failed to read it".
+  `--info-only` reports `absent_files` too.
+
+  A file that is *present but malformed* still raises. Missing means an older
+  backup; corrupt means a problem the operator needs to see.
+
+- **A leading dot is no longer stripped from filenames.** `sanitise_segment`
+  trimmed dots and spaces from *both* ends of every path segment. Trimming the
+  trailing end is right — Windows rejects trailing dots and spaces — but a leading
+  dot is a legitimate, meaningful part of a Unix filename, and removing it renamed
+  the evidence: `.GlobalPreferences.plist` was written out as
+  `GlobalPreferences.plist`, a different file from the one the backup recorded.
+
+  Found by validating against a real iPhone backup, where it affected
+  `.GlobalPreferences.plist`, `.GlobalPreferences_m.plist`, `.FirstUnlock` and the
+  `.backup/` directory. After the fix, the reconstruction agrees byte-for-byte
+  with an independent implementation on every shared path.
+
+- **An unreadable backup now fails with an actionable message.** Some acquisition
+  tools write every file mode 000 — unreadable even by the owner — and that
+  surfaced as a `PermissionError` traceback from deep inside the pipeline. The
+  backup's files are now checked for readability up front, and the error names the
+  cause and how to fix it on a working copy.
+
 ## [0.2.0] — 2026-09-30
 
 ### Added

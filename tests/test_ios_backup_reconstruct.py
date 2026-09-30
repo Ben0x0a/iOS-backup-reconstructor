@@ -9,7 +9,9 @@ Depends on: core.reconstructor, config.settings.
 
 import contextlib
 import io
+import json
 import logging
+import os
 import plistlib
 import sqlite3
 import tempfile
@@ -414,6 +416,146 @@ class ReconstructionTests(unittest.TestCase):
     def test_rebuild_mode_accepts_every_flag(self):
         argv = ["backup", "output", "--layout", "filesystem", "--format", "zip"]
         recon.reject_conflicting_mode_flags(recon.parse_args(argv), argv)
+
+    def test_backup_without_the_optional_plists_still_reconstructs(self):
+        """Older backups may carry no Status.plist (and no Info.plist).
+
+        Neither is read by reconstruction or decryption — they carry provenance
+        only — so requiring them rejected backups this tool can handle.
+        """
+        for absent in (["Status.plist"], ["Info.plist"], ["Status.plist", "Info.plist"]):
+            with self.subTest(absent=absent), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                backup, payload = self.make_backup(root)
+                for name in absent:
+                    (backup / name).unlink()
+                output = root / "out"
+                rc, _ = run_cli([str(backup), str(output), "--format", "folder", "--layout", "backup"])
+                self.assertEqual(rc, 0)
+                restored = output / "HomeDomain" / "Library" / "SMS" / "sms.db"
+                self.assertEqual(restored.read_bytes(), payload)
+
+    def test_absent_optional_files_are_recorded_not_fabricated(self):
+        """A null digest must never be ambiguous between 'the backup lacks the
+        file' and 'the tool could not read it'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, _ = self.make_backup(root)
+            (backup / "Status.plist").unlink()
+            output = root / "out"
+            rc, _ = run_cli([str(backup), str(output), "--format", "folder"])
+            self.assertEqual(rc, 0)
+
+            provenance = json.loads(
+                (output / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_PROVENANCE_NAME).read_text()
+            )["backup"]
+            self.assertEqual(provenance["absent_files"], ["Status.plist"])
+            self.assertIsNone(provenance["status_plist_sha256"])
+            # The file that IS present still gets a real digest.
+            self.assertIsNotNone(provenance["info_plist_sha256"])
+
+    def test_the_domain_map_is_still_selected_without_info_plist(self):
+        """Product version falls back to Manifest.plist's Lockdown dict."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, payload = self.make_backup(root)
+            (backup / "Info.plist").unlink()
+            with (backup / "Manifest.plist").open("wb") as fh:
+                plistlib.dump({"IsEncrypted": False, "Lockdown": {"ProductVersion": "17.0"}}, fh)
+            output = root / "out"
+            rc, _ = run_cli([str(backup), str(output), "--format", "folder"])
+            self.assertEqual(rc, 0)
+            # The filesystem layout requires a domain map, so this proves one was chosen.
+            self.assertEqual(
+                (output / "private" / "var" / "mobile" / "Library" / "SMS" / "sms.db").read_bytes(),
+                payload,
+            )
+
+    def test_manifest_files_are_still_required(self):
+        for name in ("Manifest.plist", "Manifest.db"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                backup, _ = self.make_backup(root)
+                (backup / name).unlink()
+                with self.assertRaises(recon.BackupError) as caught:
+                    recon.resolve_backup_dir(backup)
+                self.assertIn(name, str(caught.exception))
+
+    def test_a_present_but_malformed_optional_plist_still_raises(self):
+        """Missing means an older backup; corrupt means a problem to surface."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, _ = self.make_backup(root)
+            (backup / "Status.plist").write_bytes(b"not a plist at all")
+            with self.assertRaises(plistlib.InvalidFileException):
+                recon.read_optional_plist(backup / "Status.plist")
+
+            # A plist that parses but is not a dictionary is also a problem.
+            with (backup / "Status.plist").open("wb") as fh:
+                plistlib.dump(["not", "a", "dict"], fh)
+            with self.assertRaises(recon.BackupError):
+                recon.read_optional_plist(backup / "Status.plist")
+
+    def test_an_unreadable_backup_fails_with_an_actionable_message(self):
+        """Some acquisition tools write the backup mode 000 — unreadable even by
+        its owner. That surfaced as a PermissionError traceback from deep in the
+        pipeline; it must be one sentence naming the cause and the fix."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup, _ = self.make_backup(root)
+            target = backup / "Manifest.db"
+            original_mode = target.stat().st_mode
+            target.chmod(0o000)
+            try:
+                if os.access(target, os.R_OK):
+                    self.skipTest("cannot drop read permission here (running as root?)")
+                with self.assertRaises(recon.BackupError) as caught:
+                    recon.resolve_backup_dir(backup)
+                message = str(caught.exception)
+                self.assertIn("Manifest.db", message)
+                self.assertIn("permission denied", message.lower())
+                # The message must tell the operator what to do about it.
+                self.assertIn("chmod", message)
+            finally:
+                target.chmod(original_mode)
+
+    def test_a_leading_dot_is_preserved_but_a_trailing_one_is_not(self):
+        """Regression: a leading dot is part of a Unix filename; stripping it
+        renames the evidence. A TRAILING dot or space is illegal on Windows and is
+        still removed.
+
+        Found against a real iPhone backup, where `.GlobalPreferences.plist`,
+        `.FirstUnlock` and `.backup/` were all written out without their dot.
+        """
+        keep = [
+            ".GlobalPreferences.plist",
+            ".FirstUnlock",
+            ".backup",
+            ".Photos_SUPPORT",
+            ".hidden.with.dots",
+        ]
+        for segment in keep:
+            with self.subTest(segment=segment):
+                self.assertEqual(recon.sanitise_segment(segment), segment)
+
+        # Trailing dots/spaces are still removed (Windows rejects them).
+        self.assertEqual(recon.sanitise_segment("trailing."), "trailing")
+        self.assertEqual(recon.sanitise_segment("trailing "), "trailing")
+        self.assertEqual(recon.sanitise_segment(".both. "), ".both")
+        # A segment that is only dots/spaces still yields a usable name.
+        self.assertEqual(recon.sanitise_segment("  "), "_")
+
+    def test_dotfiles_survive_a_full_reconstruction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup = self.make_backup_with_sizes(root, {"Library/.GlobalPreferences.plist": (b"x" * 8, 8)})
+            output = root / "out"
+            rc, _ = run_cli([str(backup), str(output), "--format", "folder", "--layout", "backup"])
+            self.assertEqual(rc, 0)
+            self.assertTrue(
+                (output / "HomeDomain" / "Library" / ".GlobalPreferences.plist").is_file(),
+                "the dotfile must keep its name",
+            )
 
     def test_version_flag(self):
         stdout = io.StringIO()
