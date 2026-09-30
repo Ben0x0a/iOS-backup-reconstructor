@@ -13,6 +13,7 @@ Running with no arguments starts the PySide6 interface.
 | Input backup | The backup directory or its `Manifest.plist`. Accepts drag and drop |
 | Output folder | Where to write. Must already exist. Accepts drag and drop |
 | Output type | Backup folder or zip archive |
+| Mode | Rebuild into a folder tree, or decrypt only (keeping the backup's own layout) |
 | Output layout | Filesystem-like (default) or backup domains |
 | Output name | Name of the folder or archive created inside the output folder |
 | Password | Required only for encrypted backups |
@@ -22,7 +23,8 @@ Running with no arguments starts the PySide6 interface.
 
 - **Check encryption** inspects the backup and reports device, iOS version and
   whether a password is needed, without writing anything.
-- **Reconstruct** runs the reconstruction on a background thread, leaving the
+- **Reconstruct** / **Decrypt** — the button names whichever the Mode field
+  selects. It runs on a background thread, leaving the
   interface responsive. A progress bar shows files completed against the total
   from `Manifest.db`, with the current path beneath it. If the backup is
   encrypted and the password field is empty, it stops immediately and says so

@@ -103,6 +103,23 @@ class GuiTests(unittest.TestCase):
         self.assertIsNone(window._worker_thread)
         self.assertIsNone(window._worker)
 
+    def test_the_action_button_names_the_selected_mode(self):
+        """The button must say what it will actually do."""
+        window = self.make_window()
+        self.assertEqual(window.reconstruct_button.text(), "Reconstruct")
+        self.assertTrue(window.output_layout.isEnabled())
+        self.assertTrue(window.output_type.isEnabled())
+
+        window.mode.setCurrentIndex(window.mode.findData("decrypt"))
+        self.assertEqual(window.reconstruct_button.text(), "Decrypt")
+        # Neither applies to a decryption, so neither should look effective.
+        self.assertFalse(window.output_layout.isEnabled())
+        self.assertFalse(window.output_type.isEnabled())
+
+        window.mode.setCurrentIndex(window.mode.findData("rebuild"))
+        self.assertEqual(window.reconstruct_button.text(), "Reconstruct")
+        self.assertTrue(window.output_layout.isEnabled())
+
     def test_output_path_composition(self):
         window = self.make_window()
         with tempfile.TemporaryDirectory() as tmp:

@@ -291,15 +291,17 @@ def _widget_classes() -> SimpleNamespace:
             return str(self.mode.currentData())
 
         def _mode_changed(self) -> None:
-            """Disable the controls the chosen mode ignores.
+            """Match the controls and the action label to the chosen mode.
 
             Decryption writes the backup's own hash-addressed layout into a folder,
             so neither the layout nor the output type applies. Greying them out says
-            so before the run, rather than leaving them looking effective.
+            so before the run, rather than leaving them looking effective — and the
+            button names the action it will actually perform.
             """
             decrypting = self._selected_mode() == "decrypt"
             self.output_layout.setEnabled(not decrypting)
             self.output_type.setEnabled(not decrypting)
+            self.reconstruct_button.setText("Decrypt" if decrypting else "Reconstruct")
             self._update_preview()
 
         def _output_path(self) -> Path:
@@ -401,7 +403,8 @@ def _widget_classes() -> SimpleNamespace:
                 self._selected_output_layout(),
                 mode,
             )
-            self._start_worker(worker, "Reconstruction started...")
+            started = "Decryption started..." if mode == "decrypt" else "Reconstruction started..."
+            self._start_worker(worker, started)
 
         def _start_worker(self, worker: QtCore.QObject, message: str) -> None:
             cancellable = hasattr(worker, "cancel")

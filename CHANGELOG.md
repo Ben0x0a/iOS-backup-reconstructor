@@ -70,8 +70,9 @@ All notable changes to this project are documented here. The format follows
   `manifest_digest_rewritten` columns, so a rewritten digest is always auditable
   against the source's own value. Both are empty in `rebuild` mode.
 
-- GUI mode selector, with the layout and output-type controls disabled when they
-  do not apply.
+- GUI mode selector. The action button names whichever mode is selected
+  (**Reconstruct** / **Decrypt**), and the layout and output-type controls are
+  disabled when they do not apply.
 
 ### Fixed
 
