@@ -71,7 +71,16 @@ uv run python main.py /path/to/ios-backup /path/to/output --dry-run
 uv run python main.py /path/to/ios-backup /path/to/output
 ```
 
-On Windows, prefer a zip archive to avoid path-length limits:
+### Long paths on Windows
+
+A rebuilt iOS path is long before your destination is added, so many exceed
+Windows' 260-character limit. The tool writes them anyway, using the
+extended-length path form — nothing is skipped. The run reports how many were
+affected (`stats.long_paths`), because a tool that does not handle long paths will
+not be able to open those files afterwards.
+
+A zip archive avoids the question entirely, since the limit applies when files are
+extracted rather than when the archive is written:
 
 ```bash
 uv run python main.py /path/to/ios-backup /path/to/output.zip --format zip

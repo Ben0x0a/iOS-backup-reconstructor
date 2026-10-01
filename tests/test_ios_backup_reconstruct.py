@@ -573,6 +573,46 @@ class ReconstructionTests(unittest.TestCase):
             names = [f"{domain}/{rel}" for _, domain, rel, _, _ in recon.iter_manifest_rows(backup / "Manifest.db")]
             self.assertEqual(names, sorted(names))
 
+    def test_a_path_over_the_windows_limit_is_still_written(self):
+        """Regression: on Windows a destination over 260 characters failed with
+        "path too long" partway through a reconstruction.
+
+        A rebuilt iOS path is long before the operator's destination is added, so
+        this is the normal case for a real backup, not an edge case. The fix is the
+        extended-length path form; refusing to write the file would lose evidence.
+
+        This runs on every platform — it is a genuine over-length path everywhere —
+        but it is Windows CI that proves the fix.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Several nested segments rather than one huge name: Windows limits the
+            # whole path, while most file systems limit each component to 255.
+            deep = "/".join(["AVeryDeeplyNestedDirectoryName" * 2] * 5) + "/payload.bin"
+            backup = self.make_backup_with_sizes(root, {deep: (b"x" * 16, 16)})
+            output = root / "out"
+            rc, _ = run_cli([str(backup), str(output), "--format", "folder", "--layout", "backup"])
+            self.assertEqual(rc, 0, "a long destination must not fail the run")
+
+            written = output / "HomeDomain" / Path(deep)
+            self.assertTrue(len(str(written)) > recon.WINDOWS_MAX_PATH, "the test path must be over the limit")
+            self.assertTrue(written.is_file(), f"not written: {written}")
+            self.assertEqual(written.read_bytes(), b"x" * 16)
+
+            # The run reports how many destinations exceed the limit, so an operator
+            # knows the output needs long-path-aware tools.
+            provenance = json.loads(
+                (output / settings.TRACEABILITY_DIR_NAME / settings.TRACEABILITY_PROVENANCE_NAME).read_text()
+            )
+            self.assertGreaterEqual(provenance["stats"]["long_paths"], 1)
+
+    def test_long_path_is_a_no_op_off_windows(self):
+        p = Path("/tmp/some/path")
+        if os.name == "nt":
+            self.assertTrue(str(recon.long_path(p)).startswith("\\\\?\\"))
+        else:
+            self.assertEqual(recon.long_path(p), p)
+
     def test_version_flag(self):
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit):

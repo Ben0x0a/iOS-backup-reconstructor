@@ -110,13 +110,13 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(window.output_layout.isEnabled())
         self.assertTrue(window.output_type.isEnabled())
 
-        window.mode.setCurrentIndex(window.mode.findData("decrypt"))
+        window.mode_decrypt.setChecked(True)
         self.assertEqual(window.reconstruct_button.text(), "Decrypt")
         # Neither applies to a decryption, so neither should look effective.
         self.assertFalse(window.output_layout.isEnabled())
         self.assertFalse(window.output_type.isEnabled())
 
-        window.mode.setCurrentIndex(window.mode.findData("rebuild"))
+        window.mode_rebuild.setChecked(True)
         self.assertEqual(window.reconstruct_button.text(), "Reconstruct")
         self.assertTrue(window.output_layout.isEnabled())
 

@@ -159,6 +159,52 @@ def missing_optional_files(backup_dir: Path) -> list[str]:
     return [name for name in OPTIONAL_BACKUP_FILES if not (backup_dir / name).is_file()]
 
 
+# Windows refuses a path longer than this unless it carries the extended-length
+# prefix. Consumed by: long_path, and the long-path count in the run statistics.
+WINDOWS_MAX_PATH = 260
+# The prefix that lifts that limit to ~32,767 characters.
+WINDOWS_LONG_PATH_PREFIX = "\\\\?\\"
+
+
+def long_path(path: Path) -> Path:
+    r"""Return `path` in a form Windows' `MAX_PATH` limit does not apply to.
+
+    HOW: resolves the path and prepends the `\\?\` extended-length prefix (or
+    `\\?\UNC\` for a network share), which raises the limit from 260 characters
+    to roughly 32,767. A no-op on every other platform, where no such limit exists.
+
+    WHY prefix rather than skip the file: a rebuilt iOS path is long before the
+    operator's own destination is added — `private/var/mobile/Containers/Data/
+    Application/<bundle id>/Library/...` — so on Windows a reconstruction failed
+    with "path too long" partway through. The alternative, refusing to write those
+    files, loses evidence; this writes them.
+
+    The prefix is applied ONLY to paths used for I/O. Traceability records the
+    plain path, because `\\?\C:\...` is an implementation detail and an examiner
+    should not have to read it.
+    """
+    if os.name != "nt":
+        return path
+    resolved = path.resolve()
+    text = str(resolved)
+    if text.startswith(WINDOWS_LONG_PATH_PREFIX):
+        return resolved
+    if text.startswith("\\\\"):
+        # A UNC share: \\server\share -> \\?\UNC\server\share
+        return Path(f"{WINDOWS_LONG_PATH_PREFIX}UNC{text[1:]}")
+    return Path(f"{WINDOWS_LONG_PATH_PREFIX}{text}")
+
+
+def exceeds_windows_max_path(path: Path) -> bool:
+    """Whether this destination would be unreachable to a tool that does not
+    handle Windows long paths.
+
+    Reported so an operator learns the output needs long-path-aware tools, rather
+    than discovering it when something else fails to open the file.
+    """
+    return len(str(path)) > WINDOWS_MAX_PATH
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:
@@ -835,7 +881,7 @@ def write_csv(rows: list[dict[str, Any]], fh: io.TextIOBase) -> None:
 
 
 def write_trace_folder(output_dir: Path, provenance: dict[str, Any], rows: list[dict[str, Any]]) -> None:
-    trace_dir = output_dir / TRACEABILITY_DIR_NAME
+    trace_dir = long_path(output_dir) / TRACEABILITY_DIR_NAME
     trace_dir.mkdir(parents=True, exist_ok=True)
     (trace_dir / TRACEABILITY_PROVENANCE_NAME).write_text(
         json.dumps(provenance, indent=2, sort_keys=True), encoding="utf-8"
@@ -857,7 +903,17 @@ def dry_run_records(
     backup_dir: Path, db_path: Path, output_layout: str, domain_map: DomainMap | None = None
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     rows: list[dict[str, Any]] = []
-    stats = {"records": 0, "written": 0, "missing": 0, "failed": 0, "directories": 0, "cancelled": 0}
+    stats = {
+        "records": 0,
+        "written": 0,
+        "missing": 0,
+        "failed": 0,
+        "directories": 0,
+        "cancelled": 0,
+        # Destinations over Windows' 260-character limit. Written correctly via the
+        # extended-length path, but unreachable to a tool that does not handle them.
+        "long_paths": 0,
+    }
     claimed: dict[str, str] = {}
     for record in iter_file_records(backup_dir, db_path, output_layout, domain_map):
         stats["records"] += 1
@@ -877,7 +933,7 @@ def dry_run_records(
 def write_failure_report(output: Path, provenance: dict[str, Any], rows: list[dict[str, Any]]) -> Path:
     report_root = output.parent / FAILURE_REPORT_DIR_NAME
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    report_dir = report_root / f"{output.stem}-{timestamp}"
+    report_dir = long_path(report_root / f"{output.stem}-{timestamp}")
     report_dir.mkdir(parents=True, exist_ok=False)
     (report_dir / TRACEABILITY_PROVENANCE_NAME).write_text(
         json.dumps(provenance, indent=2, sort_keys=True), encoding="utf-8"
@@ -1081,10 +1137,23 @@ def reconstruct_to_folder(
     promoted on success. WHY: recording the staging path left every row of a
     forensic manifest pointing at a temporary directory that no longer exists.
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
     report_root = report_root if report_root is not None else output_dir
+    # All I/O below goes through the extended-length form; `report_root` stays
+    # plain so traceability records the path an examiner would type.
+    output_dir = long_path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
-    stats = {"records": 0, "written": 0, "missing": 0, "failed": 0, "directories": 0, "cancelled": 0}
+    stats = {
+        "records": 0,
+        "written": 0,
+        "missing": 0,
+        "failed": 0,
+        "directories": 0,
+        "cancelled": 0,
+        # Destinations over Windows' 260-character limit. Written correctly via the
+        # extended-length path, but unreachable to a tool that does not handle them.
+        "long_paths": 0,
+    }
     claimed: dict[str, str] = {}
     total = count_manifest_rows(db_path)
     for record in iter_file_records(backup_dir, db_path, output_layout, domain_map):
@@ -1133,6 +1202,8 @@ def reconstruct_to_folder(
             stats["failed"] += 1
             if target.exists():
                 target.unlink()
+        if exceeds_windows_max_path(Path(reported)):
+            stats["long_paths"] += 1
         rows.append(row)
         report_progress(progress, stats["records"], total, record.relative_path)
     return rows, stats
@@ -1149,9 +1220,20 @@ def reconstruct_to_zip(
     progress: ProgressCallback | None = None,
     cancel: CancelEvent | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    zip_path = long_path(zip_path)
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
-    stats = {"records": 0, "written": 0, "missing": 0, "failed": 0, "directories": 0, "cancelled": 0}
+    stats = {
+        "records": 0,
+        "written": 0,
+        "missing": 0,
+        "failed": 0,
+        "directories": 0,
+        "cancelled": 0,
+        # Destinations over Windows' 260-character limit. Written correctly via the
+        # extended-length path, but unreachable to a tool that does not handle them.
+        "long_paths": 0,
+    }
     claimed: dict[str, str] = {}
     total = count_manifest_rows(db_path)
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
@@ -1354,11 +1436,14 @@ def normalise_output_layout(output_layout: str) -> str:
 
 
 def promote_folder_output(staged_output: Path, final_output: Path) -> None:
+    # Both ends go through the extended-length form: the staged tree can already
+    # hold paths over Windows' limit, and so can the destination.
+    staged_output = long_path(staged_output)
     if final_output.exists():
-        shutil.copytree(staged_output, final_output, dirs_exist_ok=True)
+        shutil.copytree(staged_output, long_path(final_output), dirs_exist_ok=True)
     else:
         final_output.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(staged_output), str(final_output))
+        shutil.move(str(staged_output), str(long_path(final_output)))
 
 
 def promote_zip_output(staged_output: Path, final_output: Path, force: bool) -> None:
@@ -1367,7 +1452,7 @@ def promote_zip_output(staged_output: Path, final_output: Path, force: bool) -> 
             raise BackupError(f"Output zip already exists: {final_output}")
         final_output.unlink()
     final_output.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(staged_output), str(final_output))
+    shutil.move(str(long_path(staged_output)), str(long_path(final_output)))
 
 
 def reconstruct_backup(
@@ -1611,6 +1696,12 @@ def main(argv: list[str] | None = None) -> int:
         if progress is not None:
             print(file=sys.stderr)  # close the counter line before the result
         print(json.dumps(result.as_dict(), indent=2, sort_keys=True))
+        if result.stats.get("long_paths"):
+            _LOG.warning(
+                f"{result.stats['long_paths']} output path(s) exceed Windows' "
+                f"{WINDOWS_MAX_PATH}-character limit. They were written correctly, but a tool "
+                "that does not handle long paths will not be able to open them."
+            )
         if result.cancelled:
             _LOG.warning("Cancelled; the output is incomplete and is recorded as cancelled")
             return 3

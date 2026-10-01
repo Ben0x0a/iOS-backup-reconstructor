@@ -56,6 +56,7 @@ from core.reconstructor import (
     first_present,
     is_cancelled,
     iter_manifest_rows,
+    long_path,
     metadata_size,
     parse_file_metadata,
     plist_data_value,
@@ -118,6 +119,8 @@ def decrypt_blob(src: Path, dst: Path, key: bytes, size: int | None) -> tuple[in
     written = 0
     trailing = b""
 
+    # Extended-length form so a deep destination is not refused on Windows.
+    dst = long_path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     with src.open("rb") as fh, dst.open("wb") as out:
         while True:
@@ -311,7 +314,7 @@ def decrypt_backup(
     command = command or [TOOL_NAME]
     staging = tempfile.TemporaryDirectory(prefix="ios_backup_decrypt_", dir=output.parent.resolve())
     try:
-        staged = Path(staging.name) / output.name
+        staged = long_path(Path(staging.name) / output.name)
         staged.mkdir(parents=True, exist_ok=True)
         rows, stats, updates = _decrypt_files(backup_dir, db_path, staged, keybag, progress, cancel)
 
@@ -328,10 +331,10 @@ def decrypt_backup(
         provenance = build_decryption_provenance(backup_dir, output, manifest, info, stats, command)
         write_trace_folder(staged, provenance, rows)
         if output.exists():
-            shutil.copytree(staged, output, dirs_exist_ok=True)
+            shutil.copytree(staged, long_path(output), dirs_exist_ok=True)
         else:
             output.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(staged), str(output))
+            shutil.move(str(staged), str(long_path(output)))
     finally:
         staging.cleanup()
         if tmp_dir:

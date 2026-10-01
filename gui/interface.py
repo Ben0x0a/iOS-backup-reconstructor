@@ -192,9 +192,24 @@ def _widget_classes() -> SimpleNamespace:
             self.output_type = QtWidgets.QComboBox()
             self.output_type.addItem("Backup folder", "folder")
             self.output_type.addItem("Zip archive", "zip")
-            self.mode = QtWidgets.QComboBox()
-            self.mode.addItem("Rebuild into a folder tree", "rebuild")
-            self.mode.addItem("Decrypt only (keep backup layout)", "decrypt")
+            # Radio buttons rather than a dropdown: there are exactly two modes and
+            # they do different things to the output, so both should be visible at
+            # once instead of one hiding behind a click.
+            self.mode_rebuild = QtWidgets.QRadioButton("Rebuild into a folder tree")
+            self.mode_rebuild.setToolTip(
+                "Write every file to the path it had on the device, decrypting first when the backup is encrypted."
+            )
+            self.mode_decrypt = QtWidgets.QRadioButton("Decrypt only — keep the backup layout")
+            self.mode_decrypt.setToolTip(
+                "Write the same backup with its content in the clear, so other tools "
+                "that cannot decrypt can read it. Requires an encrypted backup."
+            )
+            self.mode_rebuild.setChecked(True)
+            # A group makes the exclusivity explicit rather than relying on the two
+            # happening to share a parent widget.
+            self.mode_group = QtWidgets.QButtonGroup(self)
+            self.mode_group.addButton(self.mode_rebuild)
+            self.mode_group.addButton(self.mode_decrypt)
             self.output_layout = QtWidgets.QComboBox()
             self.output_layout.addItem("Filesystem-like", "filesystem")
             self.output_layout.addItem("Backup domains", "backup")
@@ -237,7 +252,11 @@ def _widget_classes() -> SimpleNamespace:
             output_row.addWidget(self.output_browse)
             form.addRow("Output folder", output_row)
 
-            form.addRow("Mode", self.mode)
+            mode_row = QtWidgets.QVBoxLayout()
+            mode_row.setSpacing(2)
+            mode_row.addWidget(self.mode_rebuild)
+            mode_row.addWidget(self.mode_decrypt)
+            form.addRow("Mode", mode_row)
             form.addRow("Output type", self.output_type)
             form.addRow("Output layout", self.output_layout)
             form.addRow("Output name", self.output_name)
@@ -261,7 +280,7 @@ def _widget_classes() -> SimpleNamespace:
             self.reconstruct_button.clicked.connect(self._reconstruct)
             self.cancel_button.clicked.connect(self._cancel)
             self.input_path.textChanged.connect(self._clear_backup_info)
-            self.mode.currentIndexChanged.connect(self._mode_changed)
+            self.mode_group.buttonToggled.connect(self._mode_changed)
             self.output_type.currentIndexChanged.connect(self._update_preview)
             self.output_layout.currentIndexChanged.connect(self._update_preview)
             self.output_folder.textChanged.connect(self._update_preview)
@@ -288,7 +307,7 @@ def _widget_classes() -> SimpleNamespace:
             return str(self.output_layout.currentData())
 
         def _selected_mode(self) -> str:
-            return str(self.mode.currentData())
+            return "decrypt" if self.mode_decrypt.isChecked() else "rebuild"
 
         def _mode_changed(self) -> None:
             """Match the controls and the action label to the chosen mode.
@@ -496,6 +515,14 @@ def _widget_classes() -> SimpleNamespace:
                 f"Written: {stats.get('written', 0)}",
                 f"Missing source: {stats.get('missing', 0)}",
                 f"Failed: {stats.get('failed', 0)}",
+                *(
+                    [
+                        f"NOTE: {stats['long_paths']} path(s) exceed Windows' 260-character "
+                        "limit. Written correctly, but some tools cannot open them."
+                    ]
+                    if stats.get("long_paths")
+                    else []
+                ),
                 f"Traceability: {payload.get('traceability')}",
             ]
             self._set_status("\n".join(lines), append=False)

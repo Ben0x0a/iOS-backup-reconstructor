@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.1] — 2026-09-30
+## [0.2.2] — 2026-10-01
 
 ### Fixed
 
@@ -26,6 +26,20 @@ All notable changes to this project are documented here. The format follows
 
   A file that is *present but malformed* still raises. Missing means an older
   backup; corrupt means a problem the operator needs to see.
+
+- **Long output paths no longer fail on Windows.** A reconstruction stopped with
+  "path too long" partway through, because a rebuilt iOS path
+  (`private/var/mobile/Containers/Data/Application/<bundle id>/Library/...`) plus
+  the operator's destination easily exceeds Windows' 260-character limit. Output
+  I/O now goes through the extended-length path form, which raises the limit to
+  roughly 32,767 characters, so the files are written rather than skipped — losing
+  evidence would be the worse failure. The run reports how many destinations
+  exceed 260 characters (`stats.long_paths`), since a tool that does not handle
+  long paths will not be able to open them. Traceability still records the plain
+  path, not the prefixed one.
+
+- The GUI mode selector is now a pair of radio buttons rather than a dropdown, so
+  both options are visible at once.
 
 - **Reconstruct and Decrypt now work on the first click in the GUI.** Pressing
   either on a fresh window runs an encryption check first, then the run. That

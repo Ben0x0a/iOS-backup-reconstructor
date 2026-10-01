@@ -12,7 +12,7 @@ from __future__ import annotations
 # Tool identity. Written into every traceability artefact so reconstructed
 # evidence is attributable to the tool and version that produced it.
 TOOL_NAME = "ios-backup-reconstruct"
-TOOL_VERSION = "0.2.1"
+TOOL_VERSION = "0.2.2"
 
 # Traceability artefact names. Both carry the tool tag so an artefact found
 # outside its output folder is still attributable.
